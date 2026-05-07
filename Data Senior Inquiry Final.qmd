@@ -1,0 +1,485 @@
+---
+title: "US Domestic Aviation Recovery After COVID-19 (2018-2025)"
+author: "Ronish Sangachhe"
+date: 2026-05-07
+date-format: long
+format: pdf
+editor: visual
+echo: False
+---
+
+```{r}
+#| include: false
+
+# install.packages("tidyverse")
+# install.packages("readxl")
+# install.packages("knitr")
+```
+
+```{r}
+#| include: false
+
+library(tidyverse)
+library(readxl)
+library(knitr)
+```
+
+## 1. Problem Statement
+
+This project studies whether US domestic aviation recovered from the COVID-19 shock by 2025, using 2019 as the pre-pandemic baseline. Recovery is measured across three dimensions: flight volume (domestic departures), capacity efficiency (load factor), and operational reliability (on-time performance). The analysis covers 2018 through 2025 and asks whether these three dimensions moved together or diverged during the post-pandemic period.
+
+## 2. Research Questions
+
+1.  How did national domestic flight operations evolve from 2018 through 2025 relative to the 2019 baseline, and at what annual pace has volume been recovering since the pandemic shock?
+2.  Did domestic passenger demand recover faster than available seat capacity between 2020 and 2025, and what does the resulting load factor trend reveal about how airlines managed capacity post-pandemic?
+3.  Did on-time arrival rates improve or worsen between 2019 and 2025, and does that direction align with the demand and capacity trends seen in Q1 and Q2?
+4.  Has US domestic aviation truly recovered by 2025, or have passengers returned to a system that is operationally worse than before the pandemic?
+5.  Based on the post-shock recovery trend, what are the pessimistic, base, and optimistic scenarios for domestic flight volume in 2026-2027?
+
+## 3. Data Source
+
+- “Year-to-Date Airline on-Time Performance for Each Month, Marketing Carriers since 2018.” *Year-to-Date Airline On-Time Performance for Each Month, Marketing Carriers since 2018 \| Bureau of Transportation Statistics*, <https://www.bts.gov/year-date-airline-time-performance-each-month-marketing-carrier> Accessed 3 May 2026.
+
+- “AFF - Load Factor by Year: BTS Data Inventory.” *Bureau of Transportation Statistics*, [data.bts.gov/dataset/AFF-Load-Factor-by-Year/peh5-cwtz.](https://data.bts.gov/dataset/AFF-Load-Factor-by-Year/peh5-cwtz)Accessed 3 May 2026.
+
+- “USA Banner.” *BTS*, [www.transtats.bts.gov/.](https://www.transtats.bts.gov/) Accessed 3 May 2026.
+
+```{r}
+flight_data <- read_csv("data/t100_summary.csv", show_col_types = FALSE)
+
+# skip 2 because BTS has notes in the first rows
+otp_data <- read_excel("data/otp_summary.xlsx", skip = 2)
+```
+
+```{r}
+#| include: false
+
+# check Data import  
+print(head(flight_data, 3))
+print(head(otp_data, 3))
+```
+
+## 4. Techniques
+
+This report uses data cleaning, piecewise regression, and a scenario forecast.
+
+### Data cleaning steps
+
+I filtered both datasets down to 2018-2025 to drop the partial 2026 row. From there I pulled only the domestic columns I actually needed, gave them shorter names, and fixed the numeric fields that came in as text since BTS puts commas in numbers.
+
+```{r}
+# t100 cleanup
+flight_data <- flight_data %>%
+  filter(Year %in% 2018:2025)
+
+flight_data$Year <- as.numeric(flight_data$Year)
+
+flight_data <- flight_data %>%
+  select(
+    Year,
+    `Domestic Departures`,
+    `Domestic Passengers`,
+    `Domestic Seats`,
+    `Domestic Load Factor (%)`
+  )
+
+flight_data <- flight_data %>%
+  rename(
+    Dom_Departures = `Domestic Departures`,
+    Dom_Passengers = `Domestic Passengers`,
+    Dom_Seats = `Domestic Seats`,
+    Dom_Load_Factor = `Domestic Load Factor (%)`
+  )
+
+# strip commas
+flight_data$Dom_Departures <- gsub(",", "", flight_data$Dom_Departures)
+flight_data$Dom_Departures <- as.numeric(flight_data$Dom_Departures)
+
+flight_data$Dom_Passengers <- gsub(",", "", flight_data$Dom_Passengers)
+flight_data$Dom_Passengers <- as.numeric(flight_data$Dom_Passengers)
+
+flight_data$Dom_Seats <- gsub(",", "", flight_data$Dom_Seats)
+flight_data$Dom_Seats <- as.numeric(flight_data$Dom_Seats)
+
+flight_data$Dom_Load_Factor <- as.numeric(flight_data$Dom_Load_Factor)
+
+# otp cleanup
+otp_data <- otp_data %>%
+  filter(Year %in% as.character(2018:2025))
+
+otp_data <- otp_data %>%
+  select(
+    Year,
+    Operations,
+    `Percent On-Time Arrivals`
+  )
+
+otp_data <- otp_data %>%
+  rename(
+    OTP_Pct = `Percent On-Time Arrivals`
+  )
+
+otp_data$Year <- as.numeric(otp_data$Year)
+```
+
+```{r}
+#| include: false
+
+# quick check after cleaning
+print(flight_data)
+summary(flight_data)
+print(otp_data)
+summary(otp_data)
+```
+
+### Piecewise regression approach
+
+For Q1, three regressions are used:
+
+- Model A: one straight-line trend from 2018 to 2025.
+- Model B: quadratic trend in Year, which allows a single curve to capture the 2020 dip and the post-shock rebound without imposing a break point.
+- Model C: piecewise model with a break at 2022.
+
+The piecewise model estimates a different post-shock recovery pattern after the early pandemic years. Model A and Model B serve as comparisons, while Model C is the primary forecasting model.
+
+```{r}
+#| include: false
+
+# recovery index vs 2019
+baseline_departures <- flight_data$Dom_Departures[flight_data$Year == 2019]
+flight_data$Recovery_Index <- (flight_data$Dom_Departures / baseline_departures) * 100
+
+# piecewise regression for the 2022 break
+flight_data$Post2022 <- ifelse(flight_data$Year >= 2022, 1, 0)
+flight_data$YearsPost <- ifelse(flight_data$Year >= 2022, flight_data$Year - 2022, 0)
+
+# Model A: linear
+model_a <- lm(Dom_Departures ~ Year, data = flight_data)
+
+# Model B: quadratic
+model_b <- lm(Dom_Departures ~ Year + I(Year^2), data = flight_data)
+
+# Model C: piecewise w/ 2022 break
+model_c <- lm(Dom_Departures ~ Year + Post2022 + YearsPost, data = flight_data)
+
+summary(model_a)
+summary(model_b)
+summary(model_c)
+```
+
+### Scenario forecast explanation
+
+For Q5, I use Model C predictions for 2026 and 2027 as the base scenario, then build two additional scenarios:
+
+- Pessimistic: 10% lower than base (multiply by 0.90)
+- Optimistic: 10% higher than base (multiply by 1.10)
+
+I picked the +/-10% range because domestic departures from 2022 to 2025 changed within a narrow band. This provides a realistic downside case (slowdown, fuel pressure, weaker demand) and upside case (stronger demand recovery) without assuming a collapse similar to 2020. A scenario table fits this case because the post-shock sample is short and formal prediction intervals are not the focus of this report.
+
+## 5. Findings
+
+### Q1: Domestic Flight Volume Recovery
+
+```{r}
+baseline_q1 <- flight_data$Dom_Departures[flight_data$Year == 2019]
+
+ggplot(flight_data, aes(x = Year, y = Dom_Departures / 1000000)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_hline(yintercept = baseline_q1 / 1000000, linetype = "dashed", color = "red") +
+  scale_x_continuous(breaks = 2018:2025, limits = c(2018, 2025)) +
+  labs(
+    title = "US Domestic Flight Operations 2018-2025",
+    x = "Year",
+    y = "Departures (Millions)"
+  )
+```
+
+```{r}
+#| tbl-pos: 'H'
+
+s_a <- summary(model_a)
+s_b <- summary(model_b)
+s_c <- summary(model_c)
+
+p_a <- pf(s_a$fstatistic[1], s_a$fstatistic[2], s_a$fstatistic[3], lower.tail = FALSE)
+p_b <- pf(s_b$fstatistic[1], s_b$fstatistic[2], s_b$fstatistic[3], lower.tail = FALSE)
+p_c <- pf(s_c$fstatistic[1], s_c$fstatistic[2], s_c$fstatistic[3], lower.tail = FALSE)
+
+model_compare <- tibble(
+  Model = c("Model A", "Model B", "Model C"),
+  R_Squared = c(s_a$r.squared, s_b$r.squared, s_c$r.squared),
+  Adjusted_R_Squared = c(s_a$adj.r.squared, s_b$adj.r.squared, s_c$adj.r.squared),
+  P_Value = c(p_a, p_b, p_c)
+)
+
+model_compare <- model_compare %>%
+  mutate(
+    R_Squared = round(R_Squared, 4),
+    Adjusted_R_Squared = round(Adjusted_R_Squared, 4),
+    P_Value = round(P_Value, 4)
+  )
+
+knitr::kable(model_compare, caption = "Model A vs Model B vs Model C: Key Fit Metrics")
+```
+
+```{r}
+model_plot_data <- flight_data %>%
+  select(Year, Dom_Departures) %>%
+  mutate(
+    Fit_A = predict(model_a),
+    Fit_B = predict(model_b),
+    Fit_C = predict(model_c)
+  )
+
+# # pivot to long so facet_wrap works
+model_long <- model_plot_data %>%
+  pivot_longer(
+    cols = c(Fit_A, Fit_B, Fit_C),
+    names_to = "Model",
+    values_to = "Fitted"
+  ) %>%
+  mutate(Model = recode(Model,
+    Fit_A = "Model A (Linear)",
+    Fit_B = "Model B (Quadratic)",
+    Fit_C = "Model C (Piecewise)"
+  ))
+
+ggplot(model_long, aes(x = Year)) +
+  geom_line(aes(y = Dom_Departures / 1000000), color = "black", linewidth = 1) +
+  geom_point(aes(y = Dom_Departures / 1000000), color = "black", size = 2) +
+  geom_line(aes(y = Fitted / 1000000, color = Model), linewidth = 1) +
+  facet_wrap(~ Model, ncol = 3) +
+  scale_color_manual(values = c(
+    "Model A (Linear)"    = "steelblue",
+    "Model B (Quadratic)" = "darkorange",
+    "Model C (Piecewise)" = "darkgreen"
+  )) +
+  scale_x_continuous(breaks = c(2018, 2020, 2022, 2024)) +
+  labs(
+    title = "Model Fits vs Actual Domestic Departures (2018-2025)",
+    subtitle = "Black = actual data;  colored line = model fit",
+    x = "Year",
+    y = "Departures (Millions)"
+  ) +
+  theme(legend.position = "none")
+```
+
+Model A (linear) cannot capture the sharp 2020 drop and produces a near-flat trend with very low R-squared. Model B (quadratic) improves fit by allowing a single curve to follow the dip and rebound, while Model C (piecewise) fits best by separately estimating the pre-shock and post-2022 recovery slopes. I use the piecewise model for the Q5 scenario forecast because it best captures the post-shock recovery.
+
+I picked 2022 as the breakpoint because that is where the steep rebound from 2020-2021 levels off into a slower, steadier climb. It also makes sense from a real-world standpoint since most COVID travel restrictions were gone by 2022, so the recovery after that point was no longer a bounce-back from lockdowns but more of a gradual return toward normal.
+
+Domestic departures declined sharply in 2020 and then increased each year. By 2025, domestic departures remained below the 2019 level.
+
+### Q2: Load Factor and Capacity Efficiency
+
+```{r}
+baseline_lf <- flight_data$Dom_Load_Factor[flight_data$Year == 2019]
+
+flight_data$LF_vs_2019 <- flight_data$Dom_Load_Factor - baseline_lf
+
+ggplot(flight_data, aes(x = Year, y = Dom_Load_Factor)) +
+  geom_line(color = "darkgreen", linewidth = 1) +
+  geom_point(color = "darkgreen", size = 2) +
+  geom_hline(yintercept = baseline_lf, linetype = "dashed", color = "red") +
+  scale_x_continuous(breaks = 2018:2025, limits = c(2018, 2025)) +
+  labs(
+    title = "US Domestic Load Factor 2018-2025",
+    x = "Year",
+    y = "Load Factor (%)"
+  )
+```
+
+The load factor drops in 2020, recovers through 2024, then falls in 2025. Compared to 2019, 2025 is below baseline.
+
+The 2024-2025 decline stood out to me. I think what happened is that airlines got overconfident about demand. After two years of lockdowns, there was a wave of "revenge travel" where people flew more to make up for lost time, and airlines expanded seat capacity expecting that to keep going. But it did not. People went back to traveling at more normal levels after a few years, and airlines were stuck with more seats than they could fill. That is what the declining load factor is showing.
+
+```{r}
+#| include: false
+
+# testing the results
+lf_2025 <- flight_data$Dom_Load_Factor[flight_data$Year == 2025]
+
+if (lf_2025 > baseline_lf) {
+  print("2025 load factor is above 2019.")
+} else if (lf_2025 == baseline_lf) {
+  print("2025 load factor matches 2019.")
+} else {
+  print("2025 load factor is below 2019.")
+}
+```
+
+### Q3: On-Time Performance Trends
+
+```{r}
+baseline_otp <- otp_data$OTP_Pct[otp_data$Year == 2019]
+
+otp_data$OTP_vs_2019 <- otp_data$OTP_Pct - baseline_otp
+
+ggplot(otp_data, aes(x = Year, y = OTP_Pct)) +
+  geom_line(color = "purple", linewidth = 1) +
+  geom_point(color = "purple", size = 2) +
+  geom_hline(yintercept = baseline_otp, linetype = "dashed", color = "red") +
+  scale_x_continuous(breaks = 2018:2025, limits = c(2018, 2025)) +
+  labs(
+    title = "US Domestic On-Time Performance 2018-2025",
+    x = "Year",
+    y = "% On-Time Arrivals"
+  )
+```
+
+On-time performance is lower in 2025 (76.42%) than in 2019 (78.97%) based on the BTS data.
+
+This chart surprised me at first. I expected on-time performance to get worse during the pandemic, but it actually spiked in 2020. Once I thought about it, it made sense. Airports were mostly empty, there were fewer flights, and with lighter schedules it was just easier for airlines to stay on time.
+
+The decline after 2022 is the flip side of that. As passengers came back and airports got busier again, congestion returned. On top of that, airlines took huge financial losses during COVID and did not have the money to invest in operations that could handle the higher traffic smoothly. So we ended up with more flights running, but less reliably than before.
+
+### Q4: Overall Recovery Status
+
+```{r}
+compare_table <- tibble(
+  Metric = c("Domestic Departures", "Domestic Load Factor", "On-Time Performance"),
+  Baseline_2019 = c(
+    flight_data$Dom_Departures[flight_data$Year == 2019],
+    flight_data$Dom_Load_Factor[flight_data$Year == 2019],
+    otp_data$OTP_Pct[otp_data$Year == 2019]
+  ),
+  Value_2025 = c(
+    flight_data$Dom_Departures[flight_data$Year == 2025],
+    flight_data$Dom_Load_Factor[flight_data$Year == 2025],
+    otp_data$OTP_Pct[otp_data$Year == 2025]
+  )
+)
+
+# yes/no flag, makes the table easier to read
+compare_table$Recovered <- ifelse(compare_table$Value_2025 >= compare_table$Baseline_2019, "Yes", "No")
+
+knitr::kable(compare_table, caption = "Q4 Recovery Check: 2025 vs 2019")
+```
+
+All three metrics are below their 2019 baseline in 2025. Flights have not fully returned, planes are less full, and on-time performance got worse.
+
+What I found interesting is that these are not really three separate problems. Airlines added too much capacity because they expected the post-pandemic travel boom to last, and that drove down load factors. Running all those extra flights put more strain on airports and operations, which hurt on-time performance. And because airlines were still financially hurt from 2020-2021, they could not spend what was needed to manage the bigger network properly. The system is carrying more passengers than during the worst years, but it is doing so less reliably than before COVID-19.
+
+### Q5: Flight Volume Forecast Scenarios
+
+Q5 uses the piecewise model to create pessimistic, base, and optimistic scenarios for 2026 and 2027. Model C coefficients have p-values above 0.15, so the scenario results are directional planning ranges, not precise statistical estimates.
+
+```{r}
+future_years <- data.frame(
+  Year = c(2026, 2027),
+  Post2022 = c(1, 1),
+  YearsPost = c(4, 5)
+)
+
+base_pred <- predict(model_c, newdata = future_years)
+
+# +/- 10% scenario bands (details in report)
+scenario_scale <- 0.10
+
+scenario_table <- tibble(
+  Year = c(2026, 2027),
+  Pessimistic = base_pred * (1 - scenario_scale),
+  Base = base_pred,
+  Optimistic = base_pred * (1 + scenario_scale)
+)
+
+knitr::kable(scenario_table, caption = "Scenario Forecast for Domestic Departures")
+```
+
+```{r}
+#| include: false
+
+print(scenario_table)
+```
+
+```{r}
+hist_plot_data <- flight_data %>%
+  select(Year, Dom_Departures)
+
+actual_2025 <- flight_data$Dom_Departures[flight_data$Year == 2025]
+
+scenario_plot_data <- scenario_table %>%
+  rename(
+    Dom_Departures_Base = Base,
+    Dom_Departures_Pess = Pessimistic,
+    Dom_Departures_Opt = Optimistic
+  )
+
+
+# bridge 2025 to keep the lines connected
+bridge <- data.frame(
+  Year = 2025,
+  Dom_Departures_Base = actual_2025,
+  Dom_Departures_Pess = actual_2025,
+  Dom_Departures_Opt = actual_2025
+)
+
+scenario_plot_data <- rbind(bridge, scenario_plot_data)
+
+baseline_q1 <- flight_data$Dom_Departures[flight_data$Year == 2019]
+
+ggplot() +
+  geom_rect(
+    aes(xmin = 2025.5, xmax = 2027.5, ymin = -Inf, ymax = Inf),
+    fill = "gray80",
+    alpha = 0.2
+  ) +
+  geom_line(
+    data = hist_plot_data,
+    aes(x = Year, y = Dom_Departures / 1000000),
+    color = "black",
+    linewidth = 1
+  ) +
+  geom_point(
+    data = hist_plot_data,
+    aes(x = Year, y = Dom_Departures / 1000000),
+    color = "black",
+    size = 2
+  ) +
+  geom_hline(yintercept = baseline_q1 / 1000000, linetype = "dashed", color = "red") +
+  geom_line(
+    data = scenario_plot_data,
+    aes(x = Year, y = Dom_Departures_Pess / 1000000, color = "Pessimistic"),
+    linewidth = 1
+  ) +
+  geom_line(
+    data = scenario_plot_data,
+    aes(x = Year, y = Dom_Departures_Base / 1000000, color = "Base"),
+    linewidth = 1
+  ) +
+  geom_line(
+    data = scenario_plot_data,
+    aes(x = Year, y = Dom_Departures_Opt / 1000000, color = "Optimistic"),
+    linewidth = 1
+  ) +
+  scale_x_continuous(breaks = 2018:2027, limits = c(2018, 2027)) +
+  labs(
+    title = "Domestic Flight Volume Forecast 2026-2027",
+    x = "Year",
+    y = "Departures (Millions)",
+    color = "Scenario"
+  )
+```
+
+The base scenario indicates gradual recovery, while the pessimistic and optimistic lines represent lower and higher plausible paths.
+
+## 6. Conclusions
+
+The data shows that recovery is incomplete across all three metrics. Domestic departures reached 9.04 million in 2025, which is still 3.1% below the 2019 pre-pandemic level of 9.33 million.
+
+Load factor tells a similar story. Airlines filled 82.3% of seats in 2019. By 2025 that was down to 79.0%. I think this happened because airlines misjudged how long the post-pandemic travel surge would last. People flew a lot in 2022-2023 to make up for lost time, and airlines added capacity to match. But that demand cooled off faster than expected as people went back to traveling at a more normal pace.
+
+The on-time performance finding was the most interesting to me. In 2019, 78.97% of flights arrived on time. By 2025, that dropped to 76.42%. What is surprising is that OTP actually got better in 2020 when airports were empty. It only got worse once traffic picked back up. Airlines were still recovering from the financial hit of the pandemic and could not invest enough to keep operations running smoothly with all the added congestion.
+
+These three things are connected. Overexpanding capacity led to emptier planes. More flights strained airports. Financial pressure from the pandemic meant airlines could not fix either problem quickly. If you only look at flight volume, the recovery looks close to done. But when you factor in efficiency and reliability, the system in 2025 is still weaker than it was before COVID-19.
+
+The Q5 forecast suggests departures could match or slightly pass 2019 levels by 2026-2027 under the base case. But load factor and on-time performance will probably take longer to come back because those depend on investment and better operations, not just more passengers showing up.
+
+## 7. Limitations
+
+This analysis has two main limitations. First, the post-pandemic period only includes four years (2022-2025), which is a small sample for fitting a piecewise model and means the recovery slope is estimated with limited data. Second, the +/-10% scenario band used for the 2026-2027 forecast is a simple judgment range rather than a formal statistical prediction interval, so the scenarios should be read as planning ranges rather than precise forecasts.
+
+## 8. AI Disclosure
+
+I used Cursor (an AI-assisted IDE) to help debug and refine my R code. Additionally, I used Claude to proofread and edit the grammar of the written report.
